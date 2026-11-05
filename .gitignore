@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+/bin/
+*.dump
+*.sql.gz
+coverage.out
+.DS_Store
+
+.idea/
+.vscode/
+*.pem
+*.key
+*.pub
+*.log
+*.tar.gz
+*.zip
