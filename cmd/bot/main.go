@@ -57,8 +57,10 @@ func run(parent context.Context) error {
 	if c.Token == "" {
 		return fmt.Errorf("BOT_TOKEN is required")
 	}
-	if e = s.Bootstrap(ctx, c.Admin); e != nil {
-		return e
+	for _, adminID := range c.AdminIDs {
+		if e = s.Bootstrap(ctx, adminID); e != nil {
+			return e
+		}
 	}
 	// Session lock is held on a dedicated connection; loss stops polling before reconnect.
 	lock, e := s.Pool.Acquire(ctx)

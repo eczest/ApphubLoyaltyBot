@@ -42,6 +42,7 @@ func TestStartupSingletonAndShutdown(t *testing.T) {
 	t.Setenv("DATABASE_URL", parsed.String())
 	t.Setenv("BOT_TOKEN", "local-test-token")
 	t.Setenv("ADMIN_TELEGRAM_ID", "1")
+	t.Setenv("ADMIN_TELEGRAM_IDS", "3")
 	started := make(chan struct{}, 1)
 	original := http.DefaultTransport
 	http.DefaultTransport = transportFunc(func(r *http.Request) (*http.Response, error) {
@@ -66,6 +67,10 @@ func TestStartupSingletonAndShutdown(t *testing.T) {
 		t.Fatalf("startup: %v", e)
 	case <-time.After(10 * time.Second):
 		t.Fatal("startup timed out")
+	}
+	var admins int
+	if e = p.QueryRow(ctx, "SELECT count(*) FROM "+schema+".employees WHERE role='ADMIN' AND is_active AND telegram_id IN (1,3)").Scan(&admins); e != nil || admins != 2 {
+		t.Fatalf("multiple administrators not initialized: count=%d error=%v", admins, e)
 	}
 	if e = run(ctx); e == nil || !strings.Contains(e.Error(), "another polling") {
 		t.Fatal("singleton", e)
