@@ -112,17 +112,23 @@ func TestTelegramFlows(t *testing.T) {
 	}
 	send(2, "➖ Списать бонусы")
 	send(2, c.Phone)
-	send(2, "1000")
+	if s.Dialog(ctx, 2).Step != "debit" {
+		t.Fatal("debit should ask only the number of bonuses")
+	}
+	if e = a.handle(ctx, b, 2, "401", nil, false); e == nil {
+		t.Fatal("overdraft allowed")
+	}
 	send(2, "300")
-	d := s.Dialog(ctx, 2)
-	purchase := d.Data["purchase"]
-	send(10, "approve:"+purchase)
-	send(2, "✅ Завершить списание")
-	send(2, "sale:"+purchase)
+	send(2, "300") // a repeated message after completion cannot debit again
 	c, e = s.Customer(ctx, 10)
 	must(e)
 	if c.Balance != 100 || c.Reserved != 0 {
 		t.Fatal(c)
+	}
+	for _, stale := range []string{"approve:old", "sale:old", "/finish old receipt", "✅ Завершить списание"} {
+		if e = a.handle(ctx, b, 2, stale, nil, true); e == nil {
+			t.Fatal("old confirmation still active", stale)
+		}
 	}
 	for _, removed := range []string{"⚙️ Настройки", "ℹ️ Правила программы", "🔐 Восстановление", "💳 Моя карта", "🛠 Корректировка"} {
 		if e = a.handle(ctx, b, 1, removed, nil, false); e == nil {
@@ -146,12 +152,12 @@ func TestTelegramFlows(t *testing.T) {
 	}
 	send(10, "🎁 Мои бонусы")
 	last := messages[len(messages)-1]
-	for _, hidden := range []string{"Кешбэк", "В резерве", "Ожидают"} {
+	for _, hidden := range []string{"Кешбэк", "В резерве", "Ожидают", "50%", "Подтвердите списание"} {
 		if strings.Contains(last, hidden) {
 			t.Fatal("balance contains removed fields", last)
 		}
 	}
-	if !strings.Contains(last, "Доступно: 100") || !strings.Contains(last, "50%") {
+	if !strings.Contains(last, "Доступно: 100") {
 		t.Fatal(last)
 	}
 }

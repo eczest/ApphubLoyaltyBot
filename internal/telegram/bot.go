@@ -156,12 +156,8 @@ func (a *App) handle(ctx context.Context, b *tg.Bot, id int64, text string, cont
 		a.menu(ctx, b, id)
 		return nil
 	}
-	if strings.HasPrefix(text, "approve:") {
-		e := a.S.Approve(ctx, id, strings.TrimPrefix(text, "approve:"))
-		if e == nil {
-			a.send(ctx, b, id, "✅ Бонусы зарезервированы на 15 минут. Сообщите продавцу, что подтвердили списание.", nil)
-		}
-		return e
+	if strings.HasPrefix(text, "approve:") || strings.HasPrefix(text, "sale:") || strings.HasPrefix(text, "/finish ") || text == "✅ Завершить списание" {
+		return storage.ErrState
 	}
 	if strings.HasPrefix(text, "cancel:") {
 		return a.S.Cancel(ctx, id, strings.TrimPrefix(text, "cancel:"), false)
@@ -174,40 +170,6 @@ func (a *App) handle(ctx context.Context, b *tg.Bot, id int64, text string, cont
 		c, _ := strconv.ParseInt(parts[1], 10, 64)
 		p, _ := strconv.Atoi(parts[2])
 		return a.history(ctx, b, id, c, p)
-	}
-	if text == "✅ Завершить списание" {
-		if role == "" {
-			return storage.ErrDenied
-		}
-		if d.Step != "waiting" || d.Data["purchase"] == "" {
-			return storage.ErrState
-		}
-		return a.finishPreview(ctx, b, id, d.Data["purchase"], "bot-"+d.Data["purchase"])
-	}
-	if strings.HasPrefix(text, "sale:") {
-		p := strings.TrimPrefix(text, "sale:")
-		if role == "" {
-			return storage.ErrDenied
-		}
-		if d.Data["purchase"] != p || d.Step != "sale_confirm" {
-			return storage.ErrState
-		}
-		if e := a.S.Confirm(ctx, id, p, d.Data["receipt"]); e != nil {
-			return e
-		}
-		a.S.Clear(ctx, id)
-		a.send(ctx, b, id, "✅ Бонусы списаны.", inline("В меню", "menu"))
-		return nil
-	}
-	if strings.HasPrefix(text, "/finish ") {
-		if role == "" {
-			return storage.ErrDenied
-		}
-		p := strings.SplitN(text, " ", 3)
-		if len(p) != 3 {
-			return security.Fail("Формат: /finish ID_ПОКУПКИ НОМЕР_ЧЕКА")
-		}
-		return a.finishPreview(ctx, b, id, p[1], p[2])
 	}
 	if strings.HasPrefix(text, "admin_apply:") {
 		if role != "ADMIN" {
@@ -243,7 +205,7 @@ func (a *App) handle(ctx context.Context, b *tg.Bot, id int64, text string, cont
 		if e != nil {
 			return security.Fail("Для регистрации нажмите /register")
 		}
-		a.send(ctx, b, id, fmt.Sprintf("🎁 Ваши бонусы\n\nДоступно: %d бонусов\n\nМожно оплатить до 50%% стоимости аксессуаров.", c.Balance-c.Reserved), nil)
+		a.send(ctx, b, id, fmt.Sprintf("🎁 Ваши бонусы\n\nДоступно: %d бонусов", c.Balance-c.Reserved), nil)
 		return nil
 	case "👥 Приведи друга":
 		c, e := a.S.Customer(ctx, id)
@@ -251,7 +213,7 @@ func (a *App) handle(ctx context.Context, b *tg.Bot, id int64, text string, cont
 			return security.Fail("Сначала /register")
 		}
 		link := "https://t.me/" + a.Username + "?start=ref_" + c.Referral
-		a.send(ctx, b, id, fmt.Sprintf("👥 Приведи друга\n\nДруг регистрируется по вашей ссылке — вы оба сразу получаете по 500 бонусов. Ими можно оплатить до 50%% стоимости аксессуаров.\n\n%s", link), &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{{Text: "Поделиться ссылкой", URL: "https://t.me/share/url?url=" + url.QueryEscape(link)}}}})
+		a.send(ctx, b, id, fmt.Sprintf("👥 Приведи друга\n\nДруг регистрируется по вашей ссылке — вы оба сразу получаете по 500 бонусов. Бонусы можно потратить на аксессуары.\n\n%s", link), &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{{Text: "Поделиться ссылкой", URL: "https://t.me/share/url?url=" + url.QueryEscape(link)}}}})
 		return nil
 	case "📜 История операций":
 		c, e := a.S.Customer(ctx, id)
@@ -287,7 +249,8 @@ func (a *App) handle(ctx context.Context, b *tg.Bot, id int64, text string, cont
 			if mode == "history" {
 				return a.history(ctx, b, id, num(data["customer"]), 0)
 			}
-			return a.prompt(ctx, b, id, "amount", data, "Введите стоимость аксессуаров, чтобы рассчитать лимит списания до 50%.")
+			data["key"] = security.Token()
+			return a.prompt(ctx, b, id, "debit", data, "Сколько бонусов списать у клиента?")
 		}
 		return a.prompt(ctx, b, id, "find", map[string]string{"mode": mode}, "Введите номер телефона клиента или отсканированный QR-код.")
 	case "↩️ Возврат покупки":
@@ -322,7 +285,7 @@ func (a *App) registration(ctx context.Context, b *tg.Bot, id int64, ref string)
 	if e := a.S.SetDialog(ctx, id, "contact", map[string]string{"ref": ref}); e != nil {
 		return e
 	}
-	a.send(ctx, b, id, welcome+"\n\n🎁 Регистрируйтесь, получайте бонусы и оплачивайте ими до 50% стоимости аксессуаров.\n\nДля регистрации поделитесь своим номером телефона кнопкой ниже.", &models.ReplyKeyboardMarkup{ResizeKeyboard: true, Keyboard: [][]models.KeyboardButton{{{Text: "📱 Поделиться номером", RequestContact: true}}, {{Text: "❌ Отмена действия"}}}})
+	a.send(ctx, b, id, welcome+"\n\n🎁 Регистрируйтесь, получайте бонусы и тратьте их на аксессуары.\n\nДля регистрации поделитесь своим номером телефона кнопкой ниже.", &models.ReplyKeyboardMarkup{ResizeKeyboard: true, Keyboard: [][]models.KeyboardButton{{{Text: "📱 Поделиться номером", RequestContact: true}}, {{Text: "❌ Отмена действия"}}}})
 	return nil
 }
 func (a *App) prompt(ctx context.Context, b *tg.Bot, id int64, step string, data map[string]string, msg string) error {
@@ -343,21 +306,5 @@ func (a *App) history(ctx context.Context, b *tg.Bot, id, c int64, p int) error 
 	}
 	buttons = append(buttons, models.InlineKeyboardButton{Text: "Старее →", CallbackData: fmt.Sprintf("hist:%d:%d", c, p+1)})
 	a.send(ctx, b, id, fmt.Sprintf("📜 История · страница %d\n\n%s", p+1, t), &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{buttons, {{Text: "В меню", CallbackData: "menu"}}}})
-	return nil
-}
-func (a *App) finishPreview(ctx context.Context, b *tg.Bot, id int64, p, receipt string) error {
-	var amount, redeem int64
-	var status string
-	e := a.S.Pool.QueryRow(ctx, "SELECT accessories_amount,redeemed_amount,status FROM purchases WHERE id=$1 AND (employee_id=$2 OR EXISTS(SELECT 1 FROM employees WHERE telegram_id=$2 AND role='ADMIN' AND is_active))", p, id).Scan(&amount, &redeem, &status)
-	if e != nil {
-		return storage.ErrState
-	}
-	if status != "reserved" && status != "draft" {
-		return storage.ErrState
-	}
-	if e = a.S.SetDialog(ctx, id, "sale_confirm", map[string]string{"purchase": p, "receipt": receipt}); e != nil {
-		return e
-	}
-	a.send(ctx, b, id, fmt.Sprintf("Оплата получена?\n\nАксессуары: %d ₽\nБонусами: %d\nК оплате: %d ₽", amount, redeem, amount-redeem), inline("✅ Подтверждаю оплату", "sale:"+p))
 	return nil
 }

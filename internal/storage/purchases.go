@@ -22,13 +22,16 @@ func (s *Store) CreatePurchase(ctx context.Context, actor, c, amount, redeem int
 		return p, e
 	}
 	var balance, reserved int64
-	const cash, limit int64 = 0, 50
+	const cash int64 = 0
 	e = tx.QueryRow(ctx, "SELECT balance,reserved_balance FROM loyalty_accounts WHERE customer_id=$1 FOR UPDATE", c).Scan(&balance, &reserved)
 	if e != nil {
 		return p, e
 	}
-	if redeem > security.MaxRedeem(balance-reserved, amount, limit) {
-		return p, security.Fail("Превышен баланс или лимит оплаты бонусами")
+	if redeem > balance-reserved {
+		return p, security.Fail("Недостаточно бонусов на балансе клиента")
+	}
+	if redeem > amount {
+		return p, security.Fail("Списание превышает стоимость покупки")
 	}
 	p.Status = "draft"
 	if redeem > 0 {

@@ -156,9 +156,9 @@ func TestConcurrentReservations(t *testing.T) {
 	ctx := context.Background()
 	c := reg(t, s, 10, "")
 	must(t, s.Adjust(ctx, 1, c.ID, 3000, "Стартовая корректировка", "seed"))
-	if _, e := s.CreatePurchase(ctx, 2, c.ID, 4000, 2001); e == nil {
-		t.Fatal("over 50 percent")
-	}
+	aboveHalf, e := s.CreatePurchase(ctx, 2, c.ID, 4000, 2001)
+	must(t, e)
+	must(t, s.Cancel(ctx, 2, aboveHalf.ID, false))
 	if _, e := s.CreatePurchase(ctx, 2, c.ID, 10000, 3001); e == nil {
 		t.Fatal("over balance")
 	}
@@ -395,4 +395,115 @@ func TestUpgradePreservesExistingBalancesAndReferralHistory(t *testing.T) {
 	must(t, e)
 	must(t, s.Award(ctx, 2, c.ID, 250, "abcdef0123456789abcdef0123456789"))
 	balance(t, s, 10, 1000)
+}
+
+func TestImmediateDebitByEmployeeAndAdmin(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	c := reg(t, s, 10, "")
+	key := func(n int) string { return fmt.Sprintf("%032d", n) }
+	must(t, s.Award(ctx, 2, c.ID, 1000, key(1)))
+	if e := s.Debit(ctx, 10, c.ID, 100, key(2)); e == nil {
+		t.Fatal("customer debit allowed")
+	}
+	for _, amount := range []int64{-1, 0, 1001} {
+		if e := s.Debit(ctx, 2, c.ID, amount, key(3)); e == nil {
+			t.Fatal("invalid debit", amount)
+		}
+	}
+	balance(t, s, 10, 1000)
+	if e := s.Debit(ctx, 2, c.ID, 100, key(1)); e == nil {
+		t.Fatal("award key reused for debit")
+	}
+	must(t, s.Debit(ctx, 1, c.ID, 750, key(4)))
+	balance(t, s, 10, 250)
+	must(t, s.Debit(ctx, 2, c.ID, 250, key(5)))
+	balance(t, s, 10, 0)
+	var purchases, transactions, audits int
+	must(t, s.Pool.QueryRow(ctx, "SELECT count(*) FROM purchases").Scan(&purchases))
+	must(t, s.Pool.QueryRow(ctx, "SELECT count(*) FROM bonus_transactions WHERE type='redemption' AND purchase_id IS NULL").Scan(&transactions))
+	must(t, s.Pool.QueryRow(ctx, "SELECT count(*) FROM audit_log WHERE action='bonuses_debited'").Scan(&audits))
+	if purchases != 0 || transactions != 2 || audits != 2 {
+		t.Fatal("unexpected financial records", purchases, transactions, audits)
+	}
+}
+func TestImmediateConcurrentDebitsAndRetries(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	c := reg(t, s, 10, "")
+	key := func(n int) string { return fmt.Sprintf("%032d", n) }
+	must(t, s.Award(ctx, 2, c.ID, 1000, key(1)))
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, n := range []int{2, 3} {
+		wg.Add(1)
+		go func(n int) { defer wg.Done(); results <- s.Debit(ctx, 2, c.ID, 700, key(n)) }(n)
+	}
+	wg.Wait()
+	close(results)
+	successes := 0
+	for e := range results {
+		if e == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatal("concurrent overdraft", successes)
+	}
+	balance(t, s, 10, 300)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if e := s.Debit(ctx, 2, c.ID, 300, key(4)); e != nil {
+				t.Error(e)
+			}
+		}()
+	}
+	wg.Wait()
+	balance(t, s, 10, 0)
+	if e := s.Debit(ctx, 2, c.ID, 301, key(4)); e == nil {
+		t.Fatal("different amount accepted for reused key")
+	}
+	must(t, s.SetEmployee(ctx, 1, 2, false))
+	if e := s.Debit(ctx, 2, c.ID, 300, key(4)); e == nil {
+		t.Fatal("blocked employee")
+	}
+	var n int
+	must(t, s.Pool.QueryRow(ctx, "SELECT count(*) FROM bonus_transactions WHERE type='redemption'").Scan(&n))
+	if n != 2 {
+		t.Fatal("duplicate debits", n)
+	}
+}
+func TestImmediateDebitHonorsLegacyReservations(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	c := reg(t, s, 10, "")
+	key := func(n int) string { return fmt.Sprintf("%032d", n) }
+	must(t, s.Award(ctx, 2, c.ID, 1000, key(1)))
+	p, e := s.CreatePurchase(ctx, 2, c.ID, 2000, 600)
+	must(t, e)
+	must(t, s.Approve(ctx, 10, p.ID))
+	if e = s.Debit(ctx, 2, c.ID, 500, key(2)); e == nil {
+		t.Fatal("spent reserved bonuses")
+	}
+	must(t, s.Debit(ctx, 2, c.ID, 400, key(2)))
+	c, e = s.Customer(ctx, 10)
+	must(t, e)
+	if c.Balance != 600 || c.Reserved != 600 {
+		t.Fatal(c)
+	}
+	must(t, s.Cancel(ctx, 10, p.ID, false))
+	must(t, s.Debit(ctx, 2, c.ID, 600, key(3)))
+	balance(t, s, 10, 0)
+}
+func TestImmediateLargeDebit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	c := reg(t, s, 10, "")
+	key := func(n int) string { return fmt.Sprintf("%032d", n) }
+	must(t, s.Award(ctx, 2, c.ID, 100000000, key(1)))
+	must(t, s.Award(ctx, 2, c.ID, 100000000, key(2)))
+	must(t, s.Debit(ctx, 2, c.ID, 150000000, key(3)))
+	balance(t, s, 10, 50000000)
 }

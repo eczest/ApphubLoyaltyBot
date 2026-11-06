@@ -7,7 +7,6 @@ import (
 
 	"fmt"
 	tg "github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
 	"strconv"
 	"strings"
 )
@@ -43,8 +42,11 @@ func (a *App) input(ctx context.Context, b *tg.Bot, id int64, text string, d sto
 		case "earn":
 			data["key"] = security.Token()
 			return a.prompt(ctx, b, id, "award", data, "Сколько бонусов начислить клиенту?")
+		case "redeem":
+			data["key"] = security.Token()
+			return a.prompt(ctx, b, id, "debit", data, "Сколько бонусов списать у клиента?")
 		default:
-			return a.prompt(ctx, b, id, "amount", data, "Введите стоимость аксессуаров, чтобы рассчитать лимит списания до 50%.")
+			return storage.ErrState
 		}
 	case "award":
 		amount, e := strconv.ParseInt(strings.TrimSpace(text), 10, 64)
@@ -58,51 +60,20 @@ func (a *App) input(ctx context.Context, b *tg.Bot, id int64, text string, d sto
 		a.send(ctx, b, id, fmt.Sprintf("✅ Начислено %d бонусов.", amount), nil)
 		a.menu(ctx, b, id)
 		return nil
-	case "amount":
-		if data["mode"] != "redeem" {
-			return storage.ErrState
-		}
+	case "debit":
 		amount, e := strconv.ParseInt(strings.TrimSpace(text), 10, 64)
-		if e != nil || !security.Amount(amount) {
-			return security.Fail("Введите целую сумму от 1 до 100000000 ₽")
-		}
-		data["amount"] = text
-		if data["mode"] == "redeem" {
-			var balance int64
-			e = a.S.Pool.QueryRow(ctx, "SELECT balance-reserved_balance FROM loyalty_accounts WHERE customer_id=$1", num(data["customer"])).Scan(&balance)
-			if e != nil {
-				return e
-			}
-			return a.prompt(ctx, b, id, "redeem", data, fmt.Sprintf("Доступно: %d. Можно списать до %d бонусов.\nСколько списать?", balance, security.MaxRedeem(balance, amount, 50)))
-		}
-		return storage.ErrState
-	case "redeem":
-		redeem, e := strconv.ParseInt(strings.TrimSpace(text), 10, 64)
-		if e != nil || redeem <= 0 {
+		if e != nil || amount <= 0 {
 			return security.Fail("Введите положительное целое количество бонусов")
 		}
-		p, e := a.S.CreatePurchase(ctx, id, num(data["customer"]), num(data["amount"]), redeem)
-		if e != nil {
+		if e = a.S.Debit(ctx, id, num(data["customer"]), amount, data["key"]); e != nil {
 			return e
 		}
-		data["purchase"] = p.ID
-		var customerTG int64
-		e = a.S.Pool.QueryRow(ctx, "SELECT telegram_id FROM customers WHERE id=$1", p.Customer).Scan(&customerTG)
-		if e != nil {
-			return e
-		}
-		_, e = b.SendMessage(ctx, &tg.SendMessageParams{ChatID: customerTG, Text: fmt.Sprintf("Подтвердите списание\n\nАксессуары: %d ₽\nБонусами: %d\nК оплате рублями: %d ₽\nЗапрос действует 5 минут. После подтверждения резерв — 15 минут.", p.Amount, p.Redeem, p.Amount-p.Redeem), ReplyMarkup: &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{{Text: "✅ Подтвердить", CallbackData: "approve:" + p.ID}, {Text: "Отказать", CallbackData: "cancel:" + p.ID}}}}})
-		if e != nil {
-			_ = a.S.Cancel(ctx, id, p.ID, false)
-			return security.Fail("Не удалось доставить запрос покупателю. Покупка отменена")
-		}
-		if e = a.S.SetDialog(ctx, id, "waiting", data); e != nil {
-			return e
-		}
-		a.send(ctx, b, id, "Запрос отправлен покупателю. После его подтверждения и оплаты нажмите «✅ Завершить списание».", keyboard([]string{"✅ Завершить списание"}, []string{"❌ Отмена действия"}))
+		a.S.Clear(ctx, id)
+		a.send(ctx, b, id, fmt.Sprintf("✅ Списано %d бонусов.", amount), nil)
+		a.menu(ctx, b, id)
 		return nil
-	case "waiting":
-		return security.Fail("Дождитесь подтверждения покупателя. После оплаты нажмите «✅ Завершить списание».")
+	case "amount", "redeem", "waiting", "sale_confirm":
+		return storage.ErrState
 	case "employee", "return":
 		if role != "ADMIN" {
 			return storage.ErrDenied
@@ -131,7 +102,7 @@ func (a *App) input(ctx context.Context, b *tg.Bot, id int64, text string, d sto
 		}
 		a.send(ctx, b, id, "Проверьте действие:\n"+text+"\n\nИзменение будет сохранено в журнале.", inline("✅ Подтвердить", "admin_apply:"+data["nonce"]))
 		return nil
-	case "sale_confirm", "admin_confirm":
+	case "admin_confirm":
 		return security.Fail("Подтвердите действие кнопкой или нажмите /cancel")
 	}
 	return storage.ErrState

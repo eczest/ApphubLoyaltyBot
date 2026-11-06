@@ -179,7 +179,7 @@ func (s *Store) Register(ctx context.Context, tg, owner int64, phone, version, r
 			if e = ledger(ctx, tx, c, "", 500, "referral", "Приведи друга: регистрация по ссылке", 0); e != nil {
 				return Customer{}, e
 			}
-			if e = notify(ctx, tx, c, "👥 +500 бонусов за регистрацию друга по ссылке. Бонусами можно оплатить до 50% стоимости аксессуаров."); e != nil {
+			if e = notify(ctx, tx, c, "👥 +500 бонусов за регистрацию друга по ссылке. Бонусы можно потратить на аксессуары."); e != nil {
 				return Customer{}, e
 			}
 		}
